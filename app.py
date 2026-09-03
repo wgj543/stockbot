@@ -52,22 +52,39 @@ def callback():
 @handler.add(MessageEvent, message=TextMessageContent)
 def handle_message(event):
 
-    user_message = event.message.text
+user_message = event.message.text
 
-    with ApiClient(configuration) as api_client:
+import yfinance as yf
 
-        line_bot_api = MessagingApi(api_client)
+try:
+    stock = yf.Ticker(f"{user_message}.TW")
 
-        line_bot_api.reply_message(
-            ReplyMessageRequest(
-                reply_token=event.reply_token,
-                messages=[
-                    TextMessage(
-                        text=f"你剛剛輸入：{user_message}"
-                    )
-                ]
-            )
+    info = stock.info
+
+    stock_name = info.get("shortName")
+    price = info.get("currentPrice")
+
+    reply_text = (
+        f"股票代號：{user_message}\n"
+        f"股票名稱：{stock_name}\n"
+        f"目前股價：{price}"
+    )
+
+except Exception:
+    reply_text = "查詢失敗，請確認股票代號"
+
+with ApiClient(configuration) as api_client:
+
+    line_bot_api = MessagingApi(api_client)
+
+    line_bot_api.reply_message(
+        ReplyMessageRequest(
+            reply_token=event.reply_token,
+            messages=[
+                TextMessage(text=reply_text)
+            ]
         )
+    )
 
 
 if __name__ == "__main__":
