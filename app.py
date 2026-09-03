@@ -9,7 +9,7 @@ def home():
 
 @app.route("/callback", methods=["POST"])
 def callback():
-    print(request.json)
+    print("LINE EVENT:", request.json, flush=True)
     return "OK"
 
 if __name__ == "__main__":
