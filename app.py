@@ -67,8 +67,8 @@ def handle_message(event):
             f"收盤價：{price}"
         )
 
-    except Exception:
-        reply_text = "查詢失敗，請確認股票代號"
+    except Exception as e:
+        reply_text = f"錯誤：{str(e)}"
 
     with ApiClient(configuration) as api_client:
 
