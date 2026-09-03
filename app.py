@@ -58,15 +58,13 @@ def handle_message(event):
     try:
         stock = yf.Ticker(f"{user_message}.TW")
 
-        info = stock.info
+        data = stock.history(period="5d")
 
-        stock_name = info.get("shortName")
-        price = info.get("currentPrice")
+        price = data["Close"].iloc[-1]
 
         reply_text = (
             f"股票代號：{user_message}\n"
-            f"股票名稱：{stock_name}\n"
-            f"目前股價：{price}"
+            f"收盤價：{price}"
         )
 
     except Exception:
