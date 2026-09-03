@@ -60,11 +60,14 @@ def handle_message(event):
 
         data = stock.history(period="5d")
 
-        price = data["Close"].iloc[-1]
+        if data.empty:
+            raise Exception("查無股票資料")
+
+        price = data["Close"].dropna().iloc[-1]
 
         reply_text = (
             f"股票代號：{user_message}\n"
-            f"收盤價：{price}"
+            f"收盤價：{price:.2f}"
         )
 
     except Exception as e:
