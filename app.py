@@ -26,8 +26,15 @@ app = Flask(__name__)
 # LINE 設定
 # ===================================
 
-CHANNEL_SECRET = os.environ["CHANNEL_SECRET"]
-CHANNEL_ACCESS_TOKEN = os.environ["CHANNEL_ACCESS_TOKEN"]
+CHANNEL_SECRET = os.environ.get(
+    "CHANNEL_SECRET",
+    "LOCAL_TEST"
+)
+
+CHANNEL_ACCESS_TOKEN = os.environ.get(
+    "CHANNEL_ACCESS_TOKEN",
+    "LOCAL_TEST"
+)
 
 configuration = Configuration(
     access_token=CHANNEL_ACCESS_TOKEN
