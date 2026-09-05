@@ -162,7 +162,7 @@ def handle_message(event):
             if stock_data["type"] == "emerging":
 
                 change_info = (
-                    "⚠️ 興櫃股票\n\n"
+                    "⚠️ 興櫃股票（不提供漲跌幅資訊）\n\n"
                 )
 
             else:
