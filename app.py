@@ -17,8 +17,11 @@ from linebot.v3.webhooks import (
 )
 
 import os
-import re
-import yfinance as yf
+
+from stock import (
+    get_stock_data,
+    search_stock
+)
 
 app = Flask(__name__)
 
@@ -40,7 +43,9 @@ configuration = Configuration(
     access_token=CHANNEL_ACCESS_TOKEN
 )
 
-handler = WebhookHandler(CHANNEL_SECRET)
+handler = WebhookHandler(
+    CHANNEL_SECRET
+)
 
 # ===================================
 # 首頁
@@ -48,6 +53,7 @@ handler = WebhookHandler(CHANNEL_SECRET)
 
 @app.route("/")
 def home():
+
     return "Stock Bot Running!"
 
 # ===================================
@@ -62,7 +68,9 @@ def callback():
         ""
     )
 
-    body = request.get_data(as_text=True)
+    body = request.get_data(
+        as_text=True
+    )
 
     try:
 
@@ -88,137 +96,6 @@ def callback():
     return "OK"
 
 # ===================================
-# 股票查詢
-# ===================================
-
-def get_stock_data(stock_code):
-
-    symbols = [
-        f"{stock_code}.TW",
-        f"{stock_code}.TWO"
-    ]
-
-    for symbol in symbols:
-
-        try:
-
-            print(
-                f"開始查詢 {symbol}",
-                flush=True
-            )
-
-            stock = yf.Ticker(symbol)
-
-            intraday = stock.history(
-                period="1d",
-                interval="1m",
-                auto_adjust=False
-            )
-
-            if intraday.empty:
-                continue
-
-            intraday = intraday.dropna()
-
-            if intraday.empty:
-                continue
-
-            current_price = float(
-                intraday["Close"].iloc[-1]
-            )
-
-            high_price = float(
-                intraday["High"].max()
-            )
-
-            low_price = float(
-                intraday["Low"].min()
-            )
-
-            volume = int(
-                intraday["Volume"]
-                .fillna(0)
-                .sum()
-            )
-
-            daily = stock.history(
-                period="5d",
-                interval="1d",
-                auto_adjust=False
-            )
-
-            daily = daily.dropna()
-
-            previous_close = None
-
-            if len(daily) >= 2:
-
-                previous_close = float(
-                    daily["Close"].iloc[-2]
-                )
-
-            change = None
-            change_percent = None
-
-            if previous_close is not None:
-
-                change = (
-                    current_price
-                    - previous_close
-                )
-
-                if previous_close != 0:
-
-                    change_percent = (
-                        change
-                        / previous_close
-                        * 100
-                    )
-
-            stock_name = stock_code
-
-            try:
-
-                info = stock.info
-
-                stock_name = (
-                    info.get("shortName")
-                    or info.get("longName")
-                    or stock_code
-                )
-
-            except Exception:
-
-                pass
-
-            print(
-                f"成功取得 {symbol} "
-                f"價格={current_price}",
-                flush=True
-            )
-
-            return {
-                "code": stock_code,
-                "name": stock_name,
-                "price": current_price,
-                "change": change,
-                "change_percent": change_percent,
-                "high": high_price,
-                "low": low_price,
-                "volume": volume
-            }
-
-        except Exception as e:
-
-            print(
-                f"{symbol} 查詢失敗",
-                e,
-                flush=True
-            )
-
-    return None
-
-# ===================================
 # LINE 收訊息
 # ===================================
 
@@ -237,66 +114,83 @@ def handle_message(event):
         flush=True
     )
 
-    # 只接受 4 位數股票代號
-
-    if not re.fullmatch(
-        r"\d{4}",
+    matches = search_stock(
         user_message
-    ):
+    )
 
-        reply_text = (
-            "📈 台股查詢\n\n"
-            "請輸入股票代號，例如：\n\n"
-            "2330\n"
-            "2317\n"
-            "2454\n"
-            "2303"
-        )
+    # 找不到
 
-    else:
+    if len(matches) == 0:
+
+        if (
+            len(user_message) < 2
+            and
+            not user_message.isdigit()
+        ):
+
+            reply_text = (
+                "❓ 請至少輸入 2 個中文字\n"
+                "或完整股票代號"
+            )
+
+        else:
+
+            reply_text = (
+                "❌ 找不到符合的股票"
+            )
+
+    # 找到唯一結果
+
+    elif len(matches) == 1:
+
+        code, name = matches[0]
 
         stock_data = get_stock_data(
-            user_message
+            code
         )
 
         if stock_data is None:
 
             reply_text = (
-                f"❌ 查不到股票："
-                f"{user_message}"
+                f"❌ 查不到股票：{code}"
             )
 
         else:
 
-            if (
-                stock_data["change"]
-                is not None
-            ):
-
-                change_text = (
-                    f"{stock_data['change']:.2f}"
-                    f" "
-                    f"({stock_data['change_percent']:.2f}%)"
-                )
-
-            else:
-
-                change_text = "N/A"
-
             reply_text = (
-                f"📈 {stock_data['name']}\n"
-                f"股票代號：{stock_data['code']}\n\n"
+                f"📈 {name} ({code})\n\n"
                 f"💰 最新價格："
-                f"{stock_data['price']:.2f}\n"
-                f"📊 漲跌："
-                f"{change_text}\n\n"
+                f"{stock_data['price']:.2f}\n\n"
+                f"{stock_data['trend_icon']} 漲跌："
+                f"{stock_data['change']:+.2f}\n"
+                f"{stock_data['trend_icon']} 漲跌幅："
+                f"{stock_data['change_percent']:+.2f}%\n\n"
                 f"🔺 今日最高："
                 f"{stock_data['high']:.2f}\n"
                 f"🔻 今日最低："
-                f"{stock_data['low']:.2f}\n"
+                f"{stock_data['low']:.2f}\n\n"
                 f"📦 成交量："
-                f"{stock_data['volume']:,}"
+                f"{stock_data['volume']/1000:,.0f} 張"
             )
+
+    # 找到多筆
+
+    else:
+
+        reply_text = (
+            f"找到 {len(matches)} 筆資料\n"
+            f"以下顯示前20筆：\n\n"
+        )
+
+        for code, name in matches[:20]:
+
+            reply_text += (
+                f"{code} {name}\n"
+            )
+
+        reply_text += (
+            "\n請輸入股票代號繼續查詢"
+        )
 
     try:
 
