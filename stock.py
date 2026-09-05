@@ -19,9 +19,10 @@ def load_stock_list():
 
         for row in reader:
 
-            stock_dict[
-                row["code"]
-            ] = row["name"]
+            stock_dict[row["code"]] = {
+                "name": row["name"],
+                "type": row["type"]
+            }
 
     return stock_dict
 
@@ -40,18 +41,21 @@ def search_stock(keyword):
     contains_match = []
     code_match = []
 
-    for code, name in stock_map.items():
+    for code, info in stock_map.items():
+
+        name = info["name"]
+        stock_type = info["type"]
 
         if keyword == name:
 
             exact_match.append(
-                (code, name)
+                (code, name, stock_type)
             )
 
         elif name.startswith(keyword):
 
             startswith_match.append(
-                (code, name)
+                (code, name, stock_type)
             )
 
         elif keyword in name:
@@ -60,21 +64,22 @@ def search_stock(keyword):
                 (
                     name.find(keyword),
                     code,
-                    name
+                    name,
+                    stock_type
                 )
             )
 
         elif keyword in code:
 
             code_match.append(
-                (code, name)
+                (code, name, stock_type)
             )
 
     contains_match.sort()
 
     contains_match = [
-        (code, name)
-        for _, code, name in contains_match
+        (code, name, stock_type)
+        for _, code, name, stock_type in contains_match
     ]
 
     return (
@@ -85,7 +90,7 @@ def search_stock(keyword):
     )
 
 
-#新的函式
+## FinMind 股價查詢
 
 def get_stock_data(stock_code):
 
@@ -103,16 +108,24 @@ def get_stock_data(stock_code):
         "token": TOKEN
     }
 
-    response = requests.get(
-        url,
-        params=params
-    )
+    try:
 
-    data = response.json()
+        response = requests.get(
+            url,
+            params=params,
+            timeout=10
+        )
 
-    if not data["data"]:
+        data = response.json()
+
+    except Exception:
+
         return None
 
+    if not data["data"]:
+
+        return None
+    
     latest = data["data"][-1]
 
     previous_close = (
@@ -157,7 +170,7 @@ def get_stock_data(stock_code):
     }
 
 
-#抓台股資料
+## 更新股票清單
 
 def update_stock_list():
 
@@ -168,12 +181,20 @@ def update_stock_list():
         "token": TOKEN
     }
 
-    response = requests.get(
-        url,
-        params=params
-    )
+    try:
 
-    data = response.json()
+        response = requests.get(
+            url,
+            params=params,
+            timeout=10
+        )
+
+        data = response.json()
+
+    except Exception:
+
+        print("更新股票清單失敗")
+        return
 
     with open(
         "stock_list.csv",
@@ -185,7 +206,7 @@ def update_stock_list():
         writer = csv.writer(file)
 
         writer.writerow(
-            ["code", "name"]
+            ["code", "name", "type"]
         )
 
         for row in data["data"]:
@@ -193,11 +214,14 @@ def update_stock_list():
             writer.writerow(
                 [
                     row["stock_id"],
-                    row["stock_name"]
+                    row["stock_name"],
+                    row["type"]
                 ]
             )
 
-    print("stock_list.csv 更新完成")
+    print(
+        f"stock_list.csv 更新完成，共 {len(data['data'])} 筆資料"
+    )
 
 
 

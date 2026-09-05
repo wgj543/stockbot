@@ -143,7 +143,7 @@ def handle_message(event):
 
     elif len(matches) == 1:
 
-        code, name = matches[0]
+        code, name, stock_type = matches[0]
 
         stock_data = get_stock_data(
             code
@@ -157,14 +157,28 @@ def handle_message(event):
 
         else:
 
+            stock_data["type"] = stock_type
+
+            if stock_data["type"] == "emerging":
+
+                change_info = (
+                    "⚠️ 興櫃股票\n\n"
+                )
+
+            else:
+
+                change_info = (
+                    f"{stock_data['trend_icon']} 漲跌："
+                    f"{stock_data['change']:+.2f}\n"
+                    f"{stock_data['trend_icon']} 漲跌幅："
+                    f"{stock_data['change_percent']:+.2f}%\n\n"
+                )
+
             reply_text = (
                 f"📈 {name} ({code})\n\n"
                 f"💰 最新價格："
                 f"{stock_data['price']:.2f}\n\n"
-                f"{stock_data['trend_icon']} 漲跌："
-                f"{stock_data['change']:+.2f}\n"
-                f"{stock_data['trend_icon']} 漲跌幅："
-                f"{stock_data['change_percent']:+.2f}%\n\n"
+                f"{change_info}"                
                 f"🔺 今日最高："
                 f"{stock_data['high']:.2f}\n"
                 f"🔻 今日最低："
@@ -182,7 +196,7 @@ def handle_message(event):
             f"以下顯示前20筆：\n\n"
         )
 
-        for code, name in matches[:20]:
+        for code, name, stock_type in matches[:20]:
 
             reply_text += (
                 f"{code} {name}\n"
