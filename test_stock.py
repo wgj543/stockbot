@@ -25,7 +25,10 @@ while True:
 
         print(f"找到：{code} {name}")
 
-        result = get_stock_data(code)
+        result = get_stock_data(
+            code,
+            stock_type
+        )
 
         if result is None:
 

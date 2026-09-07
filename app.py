@@ -146,7 +146,8 @@ def handle_message(event):
         code, name, stock_type = matches[0]
 
         stock_data = get_stock_data(
-            code
+            code,
+            stock_type
         )
 
         if stock_data is None:
@@ -162,7 +163,8 @@ def handle_message(event):
             if stock_data["type"] == "emerging":
 
                 change_info = (
-                    "⚠️ 興櫃股票（不提供漲跌幅資訊）\n\n"
+                    "⚠️ 興櫃股票\n"
+                    "⚠️ 不顯示盤中資訊，僅顯示前一交易日資料\n\n"
                 )
 
             else:

@@ -92,10 +92,10 @@ def search_stock(keyword):
 
 ## FinMind 股價查詢
 
-def get_stock_data(stock_code):
+def get_finmind_data(stock_code):
 
     url = "https://api.finmindtrade.com/api/v4/data"
-
+    
     end_date = datetime.today()
 
     start_date = end_date - timedelta(days=7)
@@ -168,6 +168,125 @@ def get_stock_data(stock_code):
         "volume": latest["Trading_Volume"],
         "trend_icon": trend_icon
     }
+
+
+def get_mis_data(
+    stock_code,
+    stock_type
+):
+
+    if stock_type == "tpex":
+
+        ex_ch = f"otc_{stock_code}.tw"
+
+    else:
+
+        ex_ch = f"tse_{stock_code}.tw"
+
+    url = (
+        "https://mis.twse.com.tw/stock/api/"
+        "getStockInfo.jsp"
+    )
+
+    params = {
+        "ex_ch": ex_ch,
+        "json": 1,
+        "delay": 0
+    }
+
+    try:
+
+        response = requests.get(
+            url,
+            params=params,
+            timeout=10
+        )
+
+        data = response.json()
+
+    except Exception:
+
+        return None
+
+    if not data["msgArray"]:
+
+        return None
+
+    latest = data["msgArray"][0]
+
+    if latest["z"] in ["-", "—", "----", ""]:
+
+        return None
+
+    price = float(
+        latest["z"]
+    )
+
+    previous_close = float(
+        latest["y"]
+    )
+
+    change = (
+        price -
+        previous_close
+    )
+
+    if previous_close == 0:
+
+        change_percent = 0
+
+    else:
+
+        change_percent = (
+            change /
+            previous_close
+        ) * 100
+
+    if change > 0:
+
+        trend_icon = "🔴"
+
+    elif change < 0:
+
+        trend_icon = "🟢"
+
+    else:
+
+        trend_icon = "⚪"
+
+    return {
+        "code": stock_code,
+        "price": price,
+        "high": float(latest["h"]),
+        "low": float(latest["l"]),
+        "change": change,
+        "change_percent": change_percent,
+        "volume": float(latest["v"]) * 1000,
+        "trend_icon": trend_icon
+    }
+            
+
+def get_stock_data(
+    stock_code,
+    stock_type
+):
+
+    if stock_type == "emerging":
+
+        return get_finmind_data(
+            stock_code
+        )
+
+    else:
+
+        return get_mis_data(
+            stock_code,
+            stock_type
+        )
+
+
+
+    
 
 
 ## 更新股票清單
