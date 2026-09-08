@@ -204,7 +204,13 @@ def get_mis_data(
 
         data = response.json()
 
-    except Exception:
+    except Exception as e:
+
+        print(
+            "MIS ERROR:",
+            e,
+            flush=True
+        )
 
         return None
 
@@ -214,16 +220,48 @@ def get_mis_data(
 
     latest = data["msgArray"][0]
 
-    if latest["z"] in ["-", "—", "----", ""]:
+    print(
+        "MIS DATA:",
+        latest,
+        flush=True
+    )
+
+    price_str = latest.get(
+        "z",
+        ""
+    )
+
+    if price_str in ["-", "—", "----", ""]:
+
+        price_str = latest.get(
+            "pz",
+            ""
+        )
+
+    if price_str in ["-", "—", "----", ""]:
 
         return None
 
     price = float(
-        latest["z"]
+        price_str
     )
 
+    previous_close_str = latest.get(
+        "y",
+        "0"
+    )
+
+    if previous_close_str in [
+        "-",
+        "—",
+        "----",
+        ""
+    ]:
+
+        previous_close_str = "0"
+
     previous_close = float(
-        latest["y"]
+        previous_close_str
     )
 
     change = (
@@ -242,6 +280,46 @@ def get_mis_data(
             previous_close
         ) * 100
 
+    high = price
+
+    if latest.get("h") not in [
+        "-",
+        "—",
+        "----",
+        ""
+    ]:
+
+        high = float(
+            latest["h"]
+        )
+
+    low = price
+
+    if latest.get("l") not in [
+        "-",
+        "—",
+        "----",
+        ""
+    ]:
+
+        low = float(
+            latest["l"]
+        )
+
+    volume = 0
+
+    if latest.get("v") not in [
+        "-",
+        "—",
+        "----",
+        ""
+    ]:
+
+        volume = (
+            float(latest["v"])
+            * 1000
+        )
+
     if change > 0:
 
         trend_icon = "🔴"
@@ -257,11 +335,11 @@ def get_mis_data(
     return {
         "code": stock_code,
         "price": price,
-        "high": float(latest["h"]),
-        "low": float(latest["l"]),
+        "high": high,
+        "low": low,
         "change": change,
         "change_percent": change_percent,
-        "volume": float(latest["v"]) * 1000,
+        "volume": volume,
         "trend_icon": trend_icon
     }
             
