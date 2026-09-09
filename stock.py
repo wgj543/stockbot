@@ -450,26 +450,28 @@ def get_mis_data(
         "volume": volume,
         "trend_icon": trend_icon
     }
-            
+
+
+#-------------現在要改這裡----------            
 
 def get_stock_data(
     stock_code,
     stock_type
 ):
 
-    if stock_type == "emerging":
+#    if stock_type == "emerging":
 
-        return get_finmind_data(
-            stock_code
-        )
+#        return get_finmind_data(
+#            stock_code
+#        )
 
-    else:
+#    else:
 
-        return get_fugle_data(
-            stock_code
-        )
+    return get_fugle_data(
+        stock_code
+    )
 
-
+#-------------現在要改這裡---------- 
 
     
 

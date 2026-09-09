@@ -186,7 +186,7 @@ def handle_message(event):
                 f"🔻 今日最低："
                 f"{stock_data['low']:.2f}\n\n"
                 f"📦 成交量："
-                f"{stock_data['volume']/1000:,.0f} 張"
+                f"{stock_data['volume']:,.0f} 張"
             )
 
     # 找到多筆
