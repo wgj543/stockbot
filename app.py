@@ -160,20 +160,23 @@ def handle_message(event):
 
             stock_data["type"] = stock_type
 
-            if stock_data["type"] == "emerging":
+            change_info = (
+                f"{stock_data['trend_icon']} 漲跌："
+                f"{stock_data['change']:+.2f}\n"
+                f"{stock_data['trend_icon']} 漲跌幅："
+                f"{stock_data['change_percent']:+.2f}%\n\n"
+            )
 
-                change_info = (
-                    "⚠️ 興櫃股票\n"
-                    "⚠️ 不顯示盤中資訊，僅顯示前一交易日資料\n\n"
+            if stock_data["market"] == "ESB":
+
+                volume_text = (
+                    f"{stock_data['volume']:,.2f} 張"
                 )
 
             else:
 
-                change_info = (
-                    f"{stock_data['trend_icon']} 漲跌："
-                    f"{stock_data['change']:+.2f}\n"
-                    f"{stock_data['trend_icon']} 漲跌幅："
-                    f"{stock_data['change_percent']:+.2f}%\n\n"
+                volume_text = (
+                    f"{stock_data['volume']:,.0f} 張"
                 )
 
             reply_text = (
@@ -185,8 +188,7 @@ def handle_message(event):
                 f"{stock_data['high']:.2f}\n"
                 f"🔻 今日最低："
                 f"{stock_data['low']:.2f}\n\n"
-                f"📦 成交量："
-                f"{stock_data['volume']:,.0f} 張"
+                f"📦 成交量：{volume_text}"
             )
 
     # 找到多筆

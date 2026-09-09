@@ -210,18 +210,6 @@ def get_fugle_data(
 
         return None
 
-    print(
-        "FUGLE DATA:",
-        data,
-        flush=True
-    )
-
-    print(
-        "FUGLE KEYS:",
-        data.keys(),
-        flush=True
-    )
-
     if (
         "lastPrice" not in data
         or
@@ -248,6 +236,15 @@ def get_fugle_data(
 
         trend_icon = "⚪"
 
+    volume = data["total"]["tradeVolume"]
+
+    if data.get("market") == "ESB":
+
+        volume = round(
+            volume / 1000,
+            2
+        )
+
     try:
 
         return {
@@ -257,7 +254,8 @@ def get_fugle_data(
             "low": data["lowPrice"],
             "change": data["change"],
             "change_percent": data["changePercent"],
-            "volume": data["total"]["tradeVolume"],
+            "volume": volume,
+            "market": data.get("market"),
             "trend_icon": trend_icon
         }
     
@@ -275,206 +273,15 @@ def get_fugle_data(
         )
 
         return None
-
-
-#-------預計刪除------
-def get_mis_data(
-    stock_code,
-    stock_type
-):
-
-    if stock_type == "tpex":
-
-        ex_ch = f"otc_{stock_code}.tw"
-
-    else:
-
-        ex_ch = f"tse_{stock_code}.tw"
-
-    url = (
-        "https://mis.twse.com.tw/stock/api/"
-        "getStockInfo.jsp"
-    )
-
-    params = {
-        "ex_ch": ex_ch,
-        "json": 1,
-        "delay": 0
-    }
-
-    try:
-
-        response = requests.get(
-            url,
-            params=params,
-            timeout=10
-        )
-
-        data = response.json()
-
-    except Exception as e:
-
-        print(
-            "MIS ERROR:",
-            e,
-            flush=True
-        )
-
-        return None
-
-    if not data["msgArray"]:
-
-        return None
-
-    latest = data["msgArray"][0]
-
-    print(
-        "MIS DATA:",
-        latest,
-        flush=True
-    )
-
-    price_str = latest.get(
-        "z",
-        ""
-    )
-
-    if price_str in ["-", "—", "----", ""]:
-
-        price_str = latest.get(
-            "pz",
-            ""
-        )
-
-    if price_str in ["-", "—", "----", ""]:
-
-        return None
-
-    price = float(
-        price_str
-    )
-
-    previous_close_str = latest.get(
-        "y",
-        "0"
-    )
-
-    if previous_close_str in [
-        "-",
-        "—",
-        "----",
-        ""
-    ]:
-
-        previous_close_str = "0"
-
-    previous_close = float(
-        previous_close_str
-    )
-
-    change = (
-        price -
-        previous_close
-    )
-
-    if previous_close == 0:
-
-        change_percent = 0
-
-    else:
-
-        change_percent = (
-            change /
-            previous_close
-        ) * 100
-
-    high = price
-
-    if latest.get("h") not in [
-        "-",
-        "—",
-        "----",
-        ""
-    ]:
-
-        high = float(
-            latest["h"]
-        )
-
-    low = price
-
-    if latest.get("l") not in [
-        "-",
-        "—",
-        "----",
-        ""
-    ]:
-
-        low = float(
-            latest["l"]
-        )
-
-    volume = 0
-
-    if latest.get("v") not in [
-        "-",
-        "—",
-        "----",
-        ""
-    ]:
-
-        volume = (
-            float(latest["v"])
-            * 1000
-        )
-
-    if change > 0:
-
-        trend_icon = "🔴"
-
-    elif change < 0:
-
-        trend_icon = "🟢"
-
-    else:
-
-        trend_icon = "⚪"
-
-    return {
-        "code": stock_code,
-        "price": price,
-        "high": high,
-        "low": low,
-        "change": change,
-        "change_percent": change_percent,
-        "volume": volume,
-        "trend_icon": trend_icon
-    }
-
-
-#-------------現在要改這裡----------            
+ 
 
 def get_stock_data(
     stock_code,
     stock_type
 ):
 
-#    if stock_type == "emerging":
-
-#        return get_finmind_data(
-#            stock_code
-#        )
-
-#    else:
-
-    return get_fugle_data(
-        stock_code
-    )
-
-#-------------現在要改這裡---------- 
-
-    
-
+    return get_fugle_data(stock_code)
+   
 
 ## 更新股票清單
 
