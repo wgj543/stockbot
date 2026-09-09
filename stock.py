@@ -3,7 +3,13 @@ import csv
 import requests
 from datetime import datetime, timedelta
 
-TOKEN = os.getenv("FINMIND_TOKEN")
+FINMIND_TOKEN = os.getenv(
+    "FINMIND_TOKEN"
+)
+
+FUGLE_API_KEY = os.getenv(
+    "FUGLE_API_KEY"
+)
 
 def load_stock_list():
 
@@ -105,7 +111,7 @@ def get_finmind_data(stock_code):
         "data_id": stock_code,
         "start_date": start_date.strftime("%Y-%m-%d"),
         "end_date": end_date.strftime("%Y-%m-%d"),
-        "token": TOKEN
+        "token": FINMIND_TOKEN
     }
 
     try:
@@ -169,7 +175,67 @@ def get_finmind_data(stock_code):
         "trend_icon": trend_icon
     }
 
+def get_fugle_data(stock_code):
 
+    url = (
+        f"https://api.fugle.tw/"
+    )
+
+    print(
+        "FUGLE API READY:",
+        stock_code,
+        flush=True
+    )
+
+    return None
+
+#---富果---
+
+def get_fugle_data(
+    stock_code
+):
+
+    url = (
+        "https://api.fugle.tw/"
+        f"marketdata/v1.0/"
+        f"stock/intraday/quote/{stock_code}"
+    )
+
+    headers = {
+        "X-API-KEY": FUGLE_API_KEY
+    }
+
+    try:
+
+        response = requests.get(
+            url,
+            headers=headers,
+            timeout=10
+        )
+
+        data = response.json()
+
+    except Exception as e:
+
+        print(
+            "FUGLE ERROR:",
+            e,
+            flush=True
+        )
+
+        return None
+
+    print(
+        "FUGLE DATA:",
+        data,
+        flush=True
+    )
+
+    return None
+
+
+
+#-------預計刪除------
 def get_mis_data(
     stock_code,
     stock_type
@@ -357,9 +423,8 @@ def get_stock_data(
 
     else:
 
-        return get_mis_data(
-            stock_code,
-            stock_type
+        return get_fugle_data(
+            stock_code
         )
 
 
@@ -375,7 +440,7 @@ def update_stock_list():
 
     params = {
         "dataset": "TaiwanStockInfo",
-        "token": TOKEN
+        "token": FINMIND_TOKEN
     }
 
     try:
