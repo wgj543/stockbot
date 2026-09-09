@@ -175,21 +175,6 @@ def get_finmind_data(stock_code):
         "trend_icon": trend_icon
     }
 
-def get_fugle_data(stock_code):
-
-    url = (
-        f"https://api.fugle.tw/"
-    )
-
-    print(
-        "FUGLE API READY:",
-        stock_code,
-        flush=True
-    )
-
-    return None
-
-#---富果---
 
 def get_fugle_data(
     stock_code
@@ -231,8 +216,65 @@ def get_fugle_data(
         flush=True
     )
 
-    return None
+    print(
+        "FUGLE KEYS:",
+        data.keys(),
+        flush=True
+    )
 
+    if (
+        "lastPrice" not in data
+        or
+        data["lastPrice"] is None
+    ):
+
+        print(
+            "FUGLE INVALID DATA:",
+            data,
+            flush=True
+        )
+
+        return None
+    
+    if data.get("change", 0) > 0:
+
+        trend_icon = "🔴"
+
+    elif data.get("change", 0) < 0:
+
+        trend_icon = "🟢"
+
+    else:
+
+        trend_icon = "⚪"
+
+    try:
+
+        return {
+            "code": stock_code,
+            "price": data["lastPrice"],
+            "high": data["highPrice"],
+            "low": data["lowPrice"],
+            "change": data["change"],
+            "change_percent": data["changePercent"],
+            "volume": data["total"]["tradeVolume"],
+            "trend_icon": trend_icon
+        }
+    
+    except Exception as e:
+
+        print(
+            "FUGLE PARSE ERROR:",
+            e,
+            flush=True
+        )
+
+        print(
+            data,
+            flush=True
+        )
+
+        return None
 
 
 #-------預計刪除------
