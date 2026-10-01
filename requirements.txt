@@ -1,0 +1,6 @@
+flask
+line-bot-sdk>=3.0
+requests
+gunicorn
+SQLAlchemy>=2.0
+psycopg2-binary
