@@ -35,7 +35,55 @@ LINE_TEXT_LIMIT = 5000
 
 @app.route("/")
 def home():
-    return "Stock Bot Running!"
+    return """
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>股海小萌｜研究報告服務</title>
+</head>
+<body style="font-family: Arial, 'Microsoft JhengHei', sans-serif; max-width: 760px; margin: 64px auto; padding: 0 24px; line-height: 1.8; color: #1f2937;">
+  <h1>股海小萌</h1>
+  <p>DailyStockBot 個人研究報告與 PDF 存取服務。</p>
+  <p>本服務僅供個人投資研究使用，不構成任何買賣建議或報酬保證。</p>
+  <p>週報與月報 PDF 由使用者電腦產生，經使用者授權後上傳至其個人 Google Drive。</p>
+  <p><a href="/privacy">隱私權政策</a></p>
+</body>
+</html>
+"""
+
+
+@app.route("/privacy")
+def privacy():
+    return """
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>隱私權政策｜股海小萌</title>
+</head>
+<body style="font-family: Arial, 'Microsoft JhengHei', sans-serif; max-width: 760px; margin: 64px auto; padding: 0 24px; line-height: 1.8; color: #1f2937;">
+  <h1>股海小萌隱私權政策</h1>
+  <p>最後更新：2026 年 10 月 4 日</p>
+
+  <h2>服務用途</h2>
+  <p>股海小萌僅用於產生個人股票研究週報與月報，並依使用者授權將 PDF 上傳至使用者自己的 Google Drive。</p>
+
+  <h2>Google Drive 權限</h2>
+  <p>本服務僅使用建立及管理本服務所建立檔案所需的 Google Drive 權限，不會讀取、修改或刪除其他非本服務建立的 Google Drive 檔案。</p>
+
+  <h2>資料與權杖</h2>
+  <p>股票研究資料、Google 授權權杖與 LINE 推播設定均保留在使用者自己的電腦；本網站不蒐集帳號密碼，也不出售或分享個人資料。</p>
+
+  <h2>停止使用</h2>
+  <p>使用者可隨時移除本機授權設定，或在 Google 帳戶的第三方存取權中撤銷本服務權限。</p>
+
+  <p><a href="/">返回首頁</a></p>
+</body>
+</html>
+"""
 
 
 @app.route("/callback", methods=["POST"])
