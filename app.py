@@ -1,18 +1,26 @@
 import logging
 import os
+from urllib.parse import urlsplit, urlunsplit
 
-from flask import Flask, request
+from flask import Flask, Response, request
 from linebot.v3 import WebhookHandler
 from linebot.v3.exceptions import InvalidSignatureError
 from linebot.v3.messaging import (
     ApiClient,
     Configuration,
+    ImageMessage,
     MessagingApi,
     ReplyMessageRequest,
     TextMessage,
 )
 from linebot.v3.webhooks import MessageEvent, TextMessageContent
 
+from charting import (
+    create_stock_chart,
+    fetch_current_quote,
+    get_chart_image,
+    normalize_quote_for_reply,
+)
 from commands import handle_command
 from db import init_db
 from stock import get_stock_data, search_stock
@@ -67,7 +75,6 @@ def privacy():
 <body style="font-family: Arial, 'Microsoft JhengHei', sans-serif; max-width: 760px; margin: 64px auto; padding: 0 24px; line-height: 1.8; color: #1f2937;">
   <h1>股海小萌隱私權政策</h1>
   <p>最後更新：2026 年 10 月 4 日</p>
-
   <h2>服務用途</h2>
   <p>股海小萌僅用於產生個人股票研究週報與月報，並依使用者授權將 PDF 上傳至使用者自己的 Google Drive。</p>
 
@@ -100,23 +107,42 @@ def callback():
     return "OK"
 
 
-def build_stock_reply(user_message: str) -> str:
-    """原本的單檔股價查詢邏輯（未改動行為）。"""
+def _build_stock_reply(user_message: str, include_chart: bool = False) -> tuple[str, str | None]:
+    """Build the existing stock reply; optionally add a chart for one exact match."""
     matches = search_stock(user_message)
 
     if not matches:
         if len(user_message) < 2 and not user_message.isdigit():
-            return "❓ 請至少輸入 2 個中文字\n或完整股票代號\n\n輸入「說明」查看所有指令"
-        return "❌ 找不到符合的股票"
+            return (
+                "❓ 請至少輸入 2 個中文字\n或完整股票代號\n\n輸入「說明」查看所有指令",
+                None,
+            )
+        return "❌ 找不到符合的股票", None
 
     if len(matches) == 1:
         code, name, stock_type = matches[0]
-        data = get_stock_data(code, stock_type)
+        raw_quote = None
+        data = None
+        if include_chart:
+            try:
+                # Chart-specific live lookup must never prevent the legacy text quote fallback.
+                raw_quote = fetch_current_quote(code)
+                data = normalize_quote_for_reply(code, raw_quote) if raw_quote else None
+            except Exception:
+                logger.exception("即時走勢行情取得失敗，改用原有報價來源：%s", code)
+                raw_quote = None
+                data = None
         if data is None:
-            return f"❌ 查不到股票：{code}"
+            try:
+                data = get_stock_data(code, stock_type)
+            except Exception:
+                logger.exception("原有股價來源查詢失敗：%s", code)
+                data = None
+        if data is None:
+            return f"❌ 查不到股票：{code}", None
 
         volume_fmt = ",.2f" if data.get("market") == "ESB" else ",.0f"
-        return (
+        text = (
             f"📈 {name} ({code})\n\n"
             f"💰 最新價格：{data['price']:.2f}\n\n"
             f"{data['trend_icon']} 漲跌：{data['change']:+.2f}\n"
@@ -126,23 +152,102 @@ def build_stock_reply(user_message: str) -> str:
             f"📦 成交量：{format(data['volume'], volume_fmt)} 張"
         )
 
+        chart_id = None
+        if include_chart:
+            if raw_quote is not None:
+                try:
+                    chart_id = create_stock_chart(code, raw_quote)
+                except Exception:
+                    # A chart-generation failure is isolated from the normal text quote.
+                    logger.exception("走勢圖產生失敗：%s", code)
+                    chart_id = None
+            if chart_id is None:
+                text += "\n\n⚠️ 走勢圖暫時無法取得，以上報價仍可參考。"
+        return text, chart_id
+
     lines = "\n".join(f"{c} {n}" for c, n, _ in matches[:20])
     return (
-        f"找到 {len(matches)} 筆資料\n以下顯示前20筆：\n\n{lines}\n\n請輸入股票代號繼續查詢"
+        f"找到 {len(matches)} 筆資料\n以下顯示前20筆：\n\n{lines}\n\n請輸入股票代號繼續查詢",
+        None,
     )
 
 
-def reply(reply_token: str, text: str) -> None:
+def build_stock_reply(user_message: str) -> str:
+    """Keep the existing text-only helper available for compatibility."""
+    return _build_stock_reply(user_message, include_chart=False)[0]
+
+
+def build_stock_reply_with_chart(user_message: str) -> tuple[str, str | None]:
+    """Used for the LINE single-stock lookup to add a chart when data is available."""
+    return _build_stock_reply(user_message, include_chart=True)
+
+
+def _public_base_url() -> str:
+    base_url = (
+        os.environ.get("PUBLIC_BASE_URL")
+        or os.environ.get("RENDER_EXTERNAL_URL")
+        or request.url_root
+    ).rstrip("/")
+    parsed = urlsplit(base_url)
+    if not parsed.netloc:
+        raise ValueError("Public service URL is not configured")
+    return urlunsplit(("https", parsed.netloc, parsed.path.rstrip("/"), "", ""))
+
+
+def reply(reply_token: str, text: str, chart_id: str | None = None) -> None:
+    messages = [TextMessage(text=text[:LINE_TEXT_LIMIT])]
+    if chart_id:
+        try:
+            base_url = _public_base_url()
+            messages.append(
+                ImageMessage(
+                    original_content_url=f"{base_url}/chart/{chart_id}/original.png",
+                    preview_image_url=f"{base_url}/chart/{chart_id}/preview.png",
+                )
+            )
+        except Exception:
+            logger.exception("建立 LINE 圖片網址失敗")
+            fallback_text = text + "\n\n⚠️ 圖片網址暫時無法建立，請稍後再查詢。"
+            messages = [TextMessage(text=fallback_text[:LINE_TEXT_LIMIT])]
+
     try:
         with ApiClient(configuration) as api_client:
             MessagingApi(api_client).reply_message(
-                ReplyMessageRequest(
-                    reply_token=reply_token,
-                    messages=[TextMessage(text=text[:LINE_TEXT_LIMIT])],
-                )
+                ReplyMessageRequest(reply_token=reply_token, messages=messages)
             )
     except Exception:
         logger.exception("LINE 回覆錯誤")
+        # If the combined text+image reply is rejected (for example, an image URL
+        # validation/fetch problem), make one best-effort attempt to preserve the
+        # existing text response. If LINE already consumed the reply token, this
+        # attempt will fail harmlessly and be logged below.
+        if chart_id:
+            try:
+                with ApiClient(configuration) as api_client:
+                    MessagingApi(api_client).reply_message(
+                        ReplyMessageRequest(
+                            reply_token=reply_token,
+                            messages=[TextMessage(text=text[:LINE_TEXT_LIMIT])],
+                        )
+                    )
+            except Exception:
+                logger.exception("LINE 文字備援回覆失敗")
+
+
+@app.route("/chart/<chart_id>/<variant>.png", methods=["GET"])
+def stock_chart_image(chart_id: str, variant: str):
+    """Serve short-lived chart bytes from the same process to LINE over HTTPS."""
+    image_bytes = get_chart_image(chart_id, variant)
+    if image_bytes is None:
+        return "Chart expired or not found", 404
+    return Response(
+        image_bytes,
+        mimetype="image/png",
+        headers={
+            "Cache-Control": "public, max-age=60",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
 
 
 @handler.add(MessageEvent, message=TextMessageContent)
@@ -151,15 +256,16 @@ def handle_message(event):
     # 群組/聊天室中 user_id 可能為 None
     user_id = getattr(event.source, "user_id", None)
 
+    chart_id = None
     try:
         answer = handle_command(user_id, text) if user_id else None
         if answer is None:
-            answer = build_stock_reply(text)
+            answer, chart_id = build_stock_reply_with_chart(text)
     except Exception:
         logger.exception("處理訊息失敗")
         answer = "⚠️ 系統忙碌中，請稍後再試"
 
-    reply(event.reply_token, answer)
+    reply(event.reply_token, answer, chart_id)
 
 
 if __name__ == "__main__":
