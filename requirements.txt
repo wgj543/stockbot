@@ -1,6 +1,7 @@
-flask
+Flask
 line-bot-sdk>=3.0
 requests
 gunicorn
 SQLAlchemy>=2.0
 psycopg2-binary
+Pillow>=10.0.0
