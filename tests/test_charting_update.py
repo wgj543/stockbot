@@ -1,4 +1,4 @@
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from io import BytesIO
 import unittest
 from unittest.mock import patch
@@ -110,6 +110,31 @@ class ChartingUpdateTests(unittest.TestCase):
         visible, hidden = charting._select_visible_moving_averages(rows, axis_low, axis_high)
         self.assertIn(20, hidden)
         self.assertNotIn(20, [period for period, _, _ in visible])
+
+    def test_quote_time_label_uses_fugle_last_updated(self):
+        updated_utc = datetime(2026, 10, 30, 10, 30, tzinfo=timezone.utc)
+        timestamp_microseconds = int(updated_utc.timestamp() * 1_000_000)
+        label = charting._quote_time_label({"lastUpdated": timestamp_microseconds})
+        self.assertIn("2026-10-30 18:30:00 Asia/Taipei", label)
+
+    def test_volume_units_are_normalized_to_lots(self):
+        rows = sample_rows(30)
+        current = rows[-1]
+        quote = {
+            "date": current["date"], "openPrice": current["open"],
+            "highPrice": current["high"] + 1, "lowPrice": current["low"] - 1,
+            "lastPrice": current["close"] + 0.5, "market": "TSE",
+            "total": {"tradeVolume": 50000},
+        }
+        with patch.object(charting, "_fetch_history", return_value=rows):
+            daily = charting._daily_rows("2330", quote)
+        self.assertAlmostEqual(daily[-2]["volume"], rows[-2]["volume"] / 1000.0)
+        self.assertEqual(daily[-1]["volume"], 50000)
+
+        esb_quote = {**quote, "market": "ESB"}
+        with patch.object(charting, "_fetch_history", return_value=rows):
+            esb_daily = charting._daily_rows("1234", esb_quote)
+        self.assertEqual(esb_daily[-1]["volume"], 50.0)
 
     def test_renders_original_and_line_preview_images(self):
         rows = sample_rows(40)

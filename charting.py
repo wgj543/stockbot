@@ -164,6 +164,12 @@ def _daily_rows(stock_code: str, quote: dict) -> list[dict] | None:
     if not rows:
         return None
 
+    # Historical daily candles are shares; chart volume is normalized to lots.
+    rows = [
+        {**row, "volume": max(0.0, _number(row.get("volume")) or 0.0) / 1000.0}
+        for row in rows
+    ]
+
     # Replace an incomplete/current-day historical row with the latest quote fields.
     quote_date = str(quote.get("date", ""))[:10]
     last = _number(quote.get("lastPrice")) or _number(quote.get("closePrice"))
@@ -172,6 +178,9 @@ def _daily_rows(stock_code: str, quote: dict) -> list[dict] | None:
     low = _number(quote.get("lowPrice"))
     total = quote.get("total") if isinstance(quote.get("total"), dict) else {}
     volume = _number(total.get("tradeVolume"))
+    # Existing quote formatting treats ESB volume as shares; normalize it to lots too.
+    if volume is not None and quote.get("market") == "ESB":
+        volume /= 1000.0
 
     # A valid current-session OHLC range prevents placeholders or stale candles being shown as current.
     if not (quote_date and last and open_price and high and low and high >= low and volume is not None):
@@ -228,6 +237,33 @@ def _select_visible_moving_averages(
         visible.append((period, color, averages))
     return visible, hidden
 
+def _quote_time_label(quote: dict) -> str:
+    """Show Fugle's market-data update time, not merely chart render time."""
+    timestamp = quote.get("lastUpdated")
+    if timestamp is None and isinstance(quote.get("lastTrade"), dict):
+        timestamp = quote["lastTrade"].get("time")
+    if timestamp is None and isinstance(quote.get("total"), dict):
+        timestamp = quote["total"].get("time")
+
+    try:
+        value = float(timestamp)
+        if value <= 0:
+            raise ValueError("invalid quote timestamp")
+        # Fugle documents lastUpdated/time as Unix timestamp microseconds.
+        if value >= 1e14:
+            value /= 1_000_000.0
+        elif value >= 1e11:
+            value /= 1_000.0
+        updated_at = datetime.fromtimestamp(value, tz=_TAIPEI)
+        return f"Quote updated {updated_at:%Y-%m-%d %H:%M:%S} Asia/Taipei"
+    except (TypeError, ValueError, OverflowError, OSError):
+        retrieved_at = datetime.now(_TAIPEI)
+        return (
+            "Quote timestamp unavailable | Retrieved "
+            f"{retrieved_at:%Y-%m-%d %H:%M:%S} Asia/Taipei"
+        )
+
+
 def _render_chart(stock_code: str, rows: list[dict], quote: dict) -> tuple[bytes, bytes]:
     # Draw the price area independently of moving averages so a distant MA cannot squash candles.
     width, height = 1200, 900
@@ -238,8 +274,7 @@ def _render_chart(stock_code: str, rows: list[dict], quote: dict) -> tuple[bytes
     small_font = _font(14)
 
     draw.text((46, 28), f"{stock_code}  |  DAILY K", font=title_font, fill="#f0f4f8")
-    now = datetime.now(_TAIPEI).strftime("%Y-%m-%d %H:%M:%S Asia/Taipei")
-    draw.text((48, 68), f"Latest available quote | Retrieved {now}", font=small_font, fill="#a8b4c0")
+    draw.text((48, 68), _quote_time_label(quote), font=small_font, fill="#a8b4c0")
 
     left, right = 88, width - 38
     price_top, price_bottom = 120, 588
@@ -310,7 +345,7 @@ def _render_chart(stock_code: str, rows: list[dict], quote: dict) -> tuple[bytes
         legend_x += 165
 
     draw.line((left, vol_top, right, vol_top), fill="#34414d", width=1)
-    draw.text((left, 625), "VOLUME", font=small_font, fill="#a8b4c0")
+    draw.text((left, 625), "VOLUME (LOTS)", font=small_font, fill="#a8b4c0")
 
     latest = rows[-1]
     latest_quote_price = _number(quote.get("lastPrice")) or latest["close"]
