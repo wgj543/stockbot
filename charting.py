@@ -1,4 +1,4 @@
-"""Generate a daily candlestick chart for LINE and keep its image URLs temporarily available."""
+"""Build intraday line charts for LINE using Fugle minute candles."""
 from __future__ import annotations
 
 import io
@@ -7,7 +7,7 @@ import os
 import threading
 import time
 import uuid
-from datetime import datetime, timedelta
+from datetime import date, datetime, time as datetime_time, timedelta
 from zoneinfo import ZoneInfo
 
 import requests
@@ -22,6 +22,10 @@ _HTTP_TIMEOUT = (3.05, 8)
 _HISTORY_TTL_SECONDS = 6 * 60 * 60
 _CHART_TTL_SECONDS = 10 * 60
 _MAX_CHARTS = 256
+_SESSION_OPEN = datetime_time(9, 0)
+_SESSION_CLOSE = datetime_time(13, 30)
+_SESSION_MINUTES = 270
+_MAX_INTRADAY_MA_DEVIATION = 0.05
 
 _history_cache: dict[str, tuple[float, list[dict]]] = {}
 _chart_cache: dict[str, tuple[float, bytes, bytes]] = {}
@@ -29,11 +33,19 @@ _cache_lock = threading.Lock()
 
 
 def _font(size: int = 18) -> ImageFont.ImageFont:
-    """Use a standard font; chart labels intentionally use ASCII for portability."""
-    try:
-        return ImageFont.truetype("DejaVuSans.ttf", size=size)
-    except OSError:
-        return ImageFont.load_default()
+    """Load a common font available on Render or Windows."""
+    candidates = (
+        "NotoSansCJKtc-Regular.otf",
+        "/usr/share/fonts/opentype/noto/NotoSansCJKtc-Regular.otf",
+        "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+        "DejaVuSans.ttf",
+    )
+    for candidate in candidates:
+        try:
+            return ImageFont.truetype(candidate, size=size)
+        except OSError:
+            continue
+    return ImageFont.load_default()
 
 
 def _number(value) -> float | None:
@@ -44,12 +56,41 @@ def _number(value) -> float | None:
     return result if result == result and abs(result) != float("inf") else None
 
 
+def _parse_fugle_datetime(value) -> datetime | None:
+    """Parse Fugle ISO strings or Unix timestamps (microseconds/milliseconds)."""
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        numeric = float(value)
+        if numeric <= 0:
+            return None
+        if numeric >= 1e14:
+            numeric /= 1_000_000.0
+        elif numeric >= 1e11:
+            numeric /= 1_000.0
+        try:
+            return datetime.fromtimestamp(numeric, tz=_TAIPEI)
+        except (OverflowError, OSError, ValueError):
+            return None
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=_TAIPEI)
+        return parsed.astimezone(_TAIPEI)
+    return None
+
+
 def fetch_current_quote(stock_code: str) -> dict | None:
-    """Fetch the uncached Fugle intraday quote used by both reply text and chart."""
+    """Fetch an uncached Fugle quote; this remains the source for the live price."""
     if not FUGLE_API_KEY:
         logger.warning("Current quote unavailable: FUGLE_API_KEY is not configured")
         return None
-
     url = f"{_API_URL}/intraday/quote/{stock_code}"
     try:
         response = requests.get(
@@ -60,7 +101,6 @@ def fetch_current_quote(stock_code: str) -> dict | None:
     except (requests.RequestException, ValueError) as exc:
         logger.warning("Fugle intraday quote failed for %s: %s", stock_code, exc)
         return None
-
     if not isinstance(payload, dict) or _number(payload.get("lastPrice")) is None:
         logger.warning("Fugle intraday quote returned invalid data for %s", stock_code)
         return None
@@ -68,7 +108,7 @@ def fetch_current_quote(stock_code: str) -> dict | None:
 
 
 def normalize_quote_for_reply(stock_code: str, payload: dict | None) -> dict | None:
-    """Normalize Fugle's raw quote into the fields used by the existing text reply."""
+    """Normalize Fugle's raw quote into fields used by the existing text reply."""
     if not isinstance(payload, dict) or _number(payload.get("lastPrice")) is None:
         return None
     try:
@@ -97,6 +137,7 @@ def normalize_quote_for_reply(stock_code: str, payload: dict | None) -> dict | N
 
 
 def _fetch_history(stock_code: str) -> list[dict] | None:
+    """Fetch/cache daily closes used only to calculate MA5/MA10/MA20 references."""
     now = time.monotonic()
     with _cache_lock:
         cached = _history_cache.get(stock_code)
@@ -104,11 +145,9 @@ def _fetch_history(stock_code: str) -> list[dict] | None:
             return [dict(row) for row in cached[1]]
 
     if not FUGLE_API_KEY:
-        logger.warning("Chart unavailable: FUGLE_API_KEY is not configured")
+        logger.warning("Daily MA data unavailable: FUGLE_API_KEY is not configured")
         return None
-
     today = datetime.now(_TAIPEI).date()
-    # 120 calendar days generally provides far more than the 20 sessions needed for MA20.
     start_date = today - timedelta(days=120)
     url = f"{_API_URL}/historical/candles/{stock_code}"
     params = {
@@ -124,53 +163,46 @@ def _fetch_history(stock_code: str) -> list[dict] | None:
         )
         response.raise_for_status()
         payload = response.json()
-        if not isinstance(payload, dict):
-            logger.warning("Fugle historical candles returned non-object data for %s", stock_code)
-            return None
-        raw_rows = payload.get("data", [])
-        if not isinstance(raw_rows, list):
+        if not isinstance(payload, dict) or not isinstance(payload.get("data", []), list):
             logger.warning("Fugle historical candles returned unexpected data for %s", stock_code)
             return None
         rows = []
-        for item in raw_rows:
+        for item in payload.get("data", []):
             if not isinstance(item, dict):
                 continue
-            date = str(item.get("date", ""))[:10]
+            row_date = str(item.get("date", ""))[:10]
             open_price = _number(item.get("open"))
             high = _number(item.get("high"))
             low = _number(item.get("low"))
             close = _number(item.get("close"))
             volume = _number(item.get("volume")) or 0.0
-            if not date or any(v is None or v <= 0 for v in (open_price, high, low, close)):
+            if not row_date or any(v is None or v <= 0 for v in (open_price, high, low, close)):
                 continue
             rows.append({
-                "date": date, "open": open_price, "high": high,
+                "date": row_date, "open": open_price, "high": high,
                 "low": low, "close": close, "volume": max(0.0, volume),
             })
         rows.sort(key=lambda row: row["date"])
         if not rows:
-            logger.warning("No valid historical candles for %s", stock_code)
+            logger.warning("No valid historical daily candles for %s", stock_code)
             return None
         with _cache_lock:
             _history_cache[stock_code] = (time.monotonic(), [dict(row) for row in rows])
         return rows
     except (requests.RequestException, ValueError, TypeError) as exc:
-        logger.warning("Historical chart data fetch failed for %s: %s", stock_code, exc)
+        logger.warning("Historical MA data fetch failed for %s: %s", stock_code, exc)
         return None
 
 
 def _daily_rows(stock_code: str, quote: dict) -> list[dict] | None:
+    """Compatibility helper retained for the existing daily-volume/MA tests."""
     rows = _fetch_history(stock_code)
     if not rows:
         return None
-
-    # Historical daily candles are shares; chart volume is normalized to lots.
     rows = [
         {**row, "volume": max(0.0, _number(row.get("volume")) or 0.0) / 1000.0}
         for row in rows
     ]
-
-    # Replace an incomplete/current-day historical row with the latest quote fields.
     quote_date = str(quote.get("date", ""))[:10]
     last = _number(quote.get("lastPrice")) or _number(quote.get("closePrice"))
     open_price = _number(quote.get("openPrice"))
@@ -178,29 +210,22 @@ def _daily_rows(stock_code: str, quote: dict) -> list[dict] | None:
     low = _number(quote.get("lowPrice"))
     total = quote.get("total") if isinstance(quote.get("total"), dict) else {}
     volume = _number(total.get("tradeVolume"))
-    # Existing quote formatting treats ESB volume as shares; normalize it to lots too.
     if volume is not None and quote.get("market") == "ESB":
         volume /= 1000.0
-
-    # A valid current-session OHLC range prevents placeholders or stale candles being shown as current.
     if not (quote_date and last and open_price and high and low and high >= low and volume is not None):
-        logger.warning("Current quote lacks a usable OHLC range for %s; chart omitted", stock_code)
+        logger.warning("Current quote lacks a usable OHLC range for %s", stock_code)
         return None
-
-    if quote_date and last and open_price and high and low and high >= low and volume is not None:
-        todays_bar = {
-            "date": quote_date,
-            "open": open_price,
-            "high": max(high, open_price, last),
-            "low": min(low, open_price, last),
-            "close": last,
-            "volume": max(0.0, volume),
-        }
-        rows = [row for row in rows if row["date"] != quote_date]
-        rows.append(todays_bar)
-        rows.sort(key=lambda row: row["date"])
-
-    # Keep the most recent 60 sessions while retaining enough history for all requested MAs.
+    today_bar = {
+        "date": quote_date,
+        "open": open_price,
+        "high": max(high, open_price, last),
+        "low": min(low, open_price, last),
+        "close": last,
+        "volume": max(0.0, volume),
+    }
+    rows = [row for row in rows if row["date"] != quote_date]
+    rows.append(today_bar)
+    rows.sort(key=lambda row: row["date"])
     return rows[-60:]
 
 
@@ -216,11 +241,10 @@ def _moving_average(rows: list[dict], period: int) -> list[float | None]:
     return averages
 
 
-
 def _select_visible_moving_averages(
     rows: list[dict], axis_low: float, axis_high: float, max_deviation: float = 0.15
 ) -> tuple[list[tuple[int, str, list[float | None]]], list[int]]:
-    """Hide an MA that would sit far away from the latest candle or outside the price axis."""
+    """Compatibility helper retained for existing tests and daily MA calculations."""
     visible: list[tuple[int, str, list[float | None]]] = []
     hidden: list[int] = []
     latest_close = rows[-1]["close"]
@@ -237,137 +261,356 @@ def _select_visible_moving_averages(
         visible.append((period, color, averages))
     return visible, hidden
 
+
 def _quote_time_label(quote: dict) -> str:
-    """Show Fugle's market-data update time, not merely chart render time."""
     timestamp = quote.get("lastUpdated")
     if timestamp is None and isinstance(quote.get("lastTrade"), dict):
         timestamp = quote["lastTrade"].get("time")
     if timestamp is None and isinstance(quote.get("total"), dict):
         timestamp = quote["total"].get("time")
-
-    try:
-        value = float(timestamp)
-        if value <= 0:
-            raise ValueError("invalid quote timestamp")
-        # Fugle documents lastUpdated/time as Unix timestamp microseconds.
-        if value >= 1e14:
-            value /= 1_000_000.0
-        elif value >= 1e11:
-            value /= 1_000.0
-        updated_at = datetime.fromtimestamp(value, tz=_TAIPEI)
-        return f"Quote updated {updated_at:%Y-%m-%d %H:%M:%S} Asia/Taipei"
-    except (TypeError, ValueError, OverflowError, OSError):
+    updated_at = _parse_fugle_datetime(timestamp)
+    if updated_at is None:
         retrieved_at = datetime.now(_TAIPEI)
-        return (
-            "Quote timestamp unavailable | Retrieved "
-            f"{retrieved_at:%Y-%m-%d %H:%M:%S} Asia/Taipei"
+        return f"Quote timestamp unavailable | Retrieved {retrieved_at:%Y-%m-%d %H:%M:%S} Asia/Taipei"
+    return f"Quote updated {updated_at:%Y-%m-%d %H:%M:%S} Asia/Taipei"
+
+
+def _fetch_intraday_candles(stock_code: str, quote: dict) -> list[dict] | None:
+    """Fetch fresh one-minute candles for the current trading session (never cached)."""
+    if not FUGLE_API_KEY:
+        logger.warning("Intraday chart unavailable: FUGLE_API_KEY is not configured")
+        return None
+    url = f"{_API_URL}/intraday/candles/{stock_code}"
+    params = {"timeframe": "1", "sort": "asc"}
+    try:
+        response = requests.get(
+            url, headers={"X-API-KEY": FUGLE_API_KEY}, params=params,
+            timeout=_HTTP_TIMEOUT,
         )
+        response.raise_for_status()
+        payload = response.json()
+    except (requests.RequestException, ValueError) as exc:
+        logger.warning("Fugle one-minute candles failed for %s: %s", stock_code, exc)
+        return None
+    if not isinstance(payload, dict) or not isinstance(payload.get("data"), list):
+        logger.warning("Fugle one-minute candles returned unexpected data for %s", stock_code)
+        return None
+
+    target_date = str(quote.get("date") or payload.get("date") or "")[:10]
+    market = quote.get("market") or payload.get("market")
+    results_by_minute: dict[str, dict] = {}
+    for item in payload["data"]:
+        if not isinstance(item, dict):
+            continue
+        candle_time = _parse_fugle_datetime(item.get("date"))
+        close = _number(item.get("close"))
+        if candle_time is None or close is None or close <= 0:
+            continue
+        if target_date and candle_time.date().isoformat() != target_date:
+            continue
+        if not (_SESSION_OPEN <= candle_time.time().replace(tzinfo=None) <= _SESSION_CLOSE):
+            continue
+        volume = max(0.0, _number(item.get("volume")) or 0.0)
+        # Fugle minute-candle volume is lots for regular board lots, but shares for ESB.
+        if market == "ESB":
+            volume /= 1000.0
+        average = _number(item.get("average"))
+        high = _number(item.get("high")) or close
+        low = _number(item.get("low")) or close
+        key = candle_time.replace(second=0, microsecond=0).isoformat()
+        results_by_minute[key] = {
+            "time": candle_time,
+            "price": close,
+            "average": average,
+            "volume": volume,
+            "high": max(high, close),
+            "low": min(low, close),
+        }
+    rows = sorted(results_by_minute.values(), key=lambda row: row["time"])
+    if not rows:
+        logger.warning("No current-session one-minute candles for %s", stock_code)
+        return []
+    # Carry the most recent available average forward if a candle omits the field.
+    last_average = _number(quote.get("avgPrice"))
+    for row in rows:
+        if row["average"] is not None:
+            last_average = row["average"]
+        elif last_average is not None:
+            row["average"] = last_average
+    return rows
 
 
-def _render_chart(stock_code: str, rows: list[dict], quote: dict) -> tuple[bytes, bytes]:
-    # Draw the price area independently of moving averages so a distant MA cannot squash candles.
-    width, height = 1200, 900
-    image = Image.new("RGB", (width, height), "#0b0f14")
+def _merge_latest_quote(points: list[dict], quote: dict) -> list[dict]:
+    """Append/update the final line point with the latest quote without faking volume."""
+    if not points:
+        return []
+    merged = [dict(point) for point in points]
+    last_price = _number(quote.get("lastPrice")) or _number(quote.get("closePrice"))
+    if last_price is None or last_price <= 0:
+        return merged
+    last_trade = quote.get("lastTrade") if isinstance(quote.get("lastTrade"), dict) else {}
+    quote_time = _parse_fugle_datetime(last_trade.get("time")) or _parse_fugle_datetime(quote.get("lastUpdated"))
+    if quote_time is None:
+        merged[-1]["price"] = last_price
+        return merged
+    quote_date = str(quote.get("date", ""))[:10]
+    if quote_date and quote_time.date().isoformat() != quote_date:
+        return merged
+    if quote_time.time().replace(tzinfo=None) < _SESSION_OPEN:
+        return merged
+    if quote_time.time().replace(tzinfo=None) > _SESSION_CLOSE:
+        quote_time = quote_time.replace(
+            hour=_SESSION_CLOSE.hour, minute=_SESSION_CLOSE.minute,
+            second=0, microsecond=0,
+        )
+    latest_candle_minute = merged[-1]["time"].replace(second=0, microsecond=0)
+    quote_minute = quote_time.replace(second=0, microsecond=0)
+    if quote_minute == latest_candle_minute:
+        merged[-1]["price"] = last_price
+        merged[-1]["high"] = max(merged[-1].get("high", last_price), last_price)
+        merged[-1]["low"] = min(merged[-1].get("low", last_price), last_price)
+        avg_price = _number(quote.get("avgPrice"))
+        if avg_price is not None:
+            merged[-1]["average"] = avg_price
+    elif quote_time >= merged[-1]["time"]:
+        merged.append({
+            "time": quote_time,
+            "price": last_price,
+            "average": _number(quote.get("avgPrice")) or merged[-1].get("average"),
+            "volume": 0.0,
+            "high": last_price,
+            "low": last_price,
+        })
+    return merged
+
+
+def _daily_ma_levels(stock_code: str, quote: dict) -> dict[int, float]:
+    """Calculate provisional MA5/10/20 using prior daily closes plus today's last price."""
+    history = _fetch_history(stock_code)
+    if not history:
+        return {}
+    quote_date = str(quote.get("date") or datetime.now(_TAIPEI).date().isoformat())[:10]
+    last_price = _number(quote.get("lastPrice")) or _number(quote.get("closePrice"))
+    if last_price is None or last_price <= 0:
+        return {}
+    completed_closes = [
+        row["close"] for row in history
+        if str(row.get("date", ""))[:10] < quote_date and _number(row.get("close")) is not None
+    ]
+    levels: dict[int, float] = {}
+    for period in (5, 10, 20):
+        if len(completed_closes) >= period - 1:
+            sample = completed_closes[-(period - 1):] + [last_price]
+            levels[period] = sum(sample) / period
+    return levels
+
+
+def _visible_intraday_ma_levels(
+    ma_levels: dict[int, float], latest_price: float,
+    max_deviation: float = _MAX_INTRADAY_MA_DEVIATION,
+) -> tuple[dict[int, float], list[int]]:
+    visible: dict[int, float] = {}
+    hidden: list[int] = []
+    for period in (5, 10, 20):
+        value = ma_levels.get(period)
+        if value is None or latest_price <= 0:
+            hidden.append(period)
+            continue
+        if abs(value - latest_price) / latest_price > max_deviation:
+            hidden.append(period)
+            continue
+        visible[period] = value
+    return visible, hidden
+
+
+def _draw_dashed_line(draw: ImageDraw.ImageDraw, xy: tuple[int, int, int, int], fill: str, width: int = 2) -> None:
+    x1, y, x2, _ = xy
+    segment, gap = 12, 8
+    x = x1
+    while x < x2:
+        end = min(x + segment, x2)
+        draw.line((x, y, end, y), fill=fill, width=width)
+        x = end + gap
+
+
+def _render_chart(
+    stock_code: str, points: list[dict], quote: dict, ma_levels: dict[int, float]
+) -> tuple[bytes, bytes]:
+    """Render the intraday price path, VWAP/average line, daily MA levels and minute volume."""
+    width, height = 1000, 1200
+    image = Image.new("RGB", (width, height), "#05090d")
     draw = ImageDraw.Draw(image)
     title_font = _font(28)
-    label_font = _font(17)
+    price_font = _font(66)
+    label_font = _font(18)
     small_font = _font(14)
 
-    draw.text((46, 28), f"{stock_code}  |  DAILY K", font=title_font, fill="#f0f4f8")
-    draw.text((48, 68), _quote_time_label(quote), font=small_font, fill="#a8b4c0")
+    latest_price = _number(quote.get("lastPrice")) or points[-1]["price"]
+    change = _number(quote.get("change"))
+    if change is None:
+        previous_close = _number(quote.get("previousClose")) or latest_price
+        change = latest_price - previous_close
+    change_percent = _number(quote.get("changePercent"))
+    if change_percent is None:
+        previous_close = _number(quote.get("previousClose")) or latest_price
+        change_percent = (change / previous_close * 100.0) if previous_close else 0.0
+    positive = change >= 0
+    price_color = "#ff4d57" if positive else "#20e66b"
+    fill_color = (210, 45, 58, 62) if positive else (10, 150, 62, 65)
 
-    left, right = 88, width - 38
-    price_top, price_bottom = 120, 588
-    vol_top, vol_bottom = 650, 805
+    stock_name = str(quote.get("name") or "").strip()
+    heading = f"{stock_code}  {stock_name}" if stock_name else stock_code
+    draw.text((42, 24), heading, font=title_font, fill="#f0f4f8")
+    draw.text((42, 72), "INTRADAY PRICE", font=small_font, fill="#8d9aa6")
+    draw.text((42, 104), f"{latest_price:.2f}", font=price_font, fill=price_color)
+    draw.text((390, 133), f"{change:+.2f} ({change_percent:+.2f}%)", font=title_font, fill=price_color)
+
+    open_price = _number(quote.get("openPrice"))
+    high_price = _number(quote.get("highPrice"))
+    low_price = _number(quote.get("lowPrice"))
+    avg_price = _number(quote.get("avgPrice"))
+    previous_close = _number(quote.get("previousClose"))
+    summary_parts = []
+    for label, value in (("OPEN", open_price), ("HIGH", high_price), ("LOW", low_price), ("AVG", avg_price), ("PREV", previous_close)):
+        if value is not None:
+            summary_parts.append(f"{label} {value:.2f}")
+    draw.text((44, 202), "    ".join(summary_parts), font=label_font, fill="#d0d7de")
+    draw.text((44, 238), _quote_time_label(quote), font=small_font, fill="#91a0ad")
+
+    left, right = 105, 960
+    plot_top, plot_bottom = 365, 855
+    volume_top, volume_bottom = 925, 1080
     plot_width = right - left
-    count = len(rows)
-    slot = plot_width / max(count, 1)
-    candle_width = max(3, min(12, int(slot * 0.55)))
 
-    visible_low = min(row["low"] for row in rows)
-    visible_high = max(row["high"] for row in rows)
-    spread = max(visible_high - visible_low, visible_high * 0.015, 0.01)
-    axis_low = visible_low - spread * 0.08
-    axis_high = visible_high + spread * 0.08
+    visible_mas, hidden_mas = _visible_intraday_ma_levels(ma_levels, latest_price)
+    price_values = [point["price"] for point in points]
+    price_values += [v for v in (point.get("average") for point in points) if v is not None]
+    if previous_close is not None:
+        price_values.append(previous_close)
+    price_values.extend(visible_mas.values())
+    price_low, price_high = min(price_values), max(price_values)
+    raw_spread = price_high - price_low
+    pad = max(raw_spread * 0.09, latest_price * 0.003, 0.05)
+    axis_low, axis_high = price_low - pad, price_high + pad
     if axis_high <= axis_low:
-        axis_high = axis_low + 1
+        axis_high = axis_low + 1.0
 
     def y_price(value: float) -> float:
-        return price_bottom - (value - axis_low) / (axis_high - axis_low) * (price_bottom - price_top)
+        return plot_bottom - (value - axis_low) / (axis_high - axis_low) * (plot_bottom - plot_top)
 
-    # Price grid and scale.
-    for i in range(6):
-        y = price_top + i * (price_bottom - price_top) / 5
-        value = axis_high - i * (axis_high - axis_low) / 5
-        draw.line((left, y, right, y), fill="#28323d", width=1)
-        draw.text((8, int(y - 10)), f"{value:.2f}", font=label_font, fill="#9eabb7")
-    for i in range(0, count, max(1, count // 6)):
-        x = left + (i + 0.5) * slot
-        draw.line((x, price_top, x, vol_bottom), fill="#1a232d", width=1)
-        draw.text((int(x - 32), 610), rows[i]["date"][5:], font=small_font, fill="#8f9ba7")
+    def x_time(value: datetime) -> float:
+        local = value.astimezone(_TAIPEI)
+        minute = (local.hour - 9) * 60 + local.minute + local.second / 60.0
+        minute = min(max(minute, 0.0), float(_SESSION_MINUTES))
+        return left + minute / _SESSION_MINUTES * plot_width
 
-    # Keep the price axis focused on candles; hide an MA if its latest value is >15% away.
-    ma_drawn, ma_hidden = _select_visible_moving_averages(rows, axis_low, axis_high)
+    # Price grid and y-axis labels.
+    for idx in range(6):
+        y = plot_top + idx * (plot_bottom - plot_top) / 5
+        value = axis_high - idx * (axis_high - axis_low) / 5
+        draw.line((left, y, right, y), fill="#252e36", width=1)
+        draw.text((8, int(y - 10)), f"{value:.2f}", font=small_font, fill="#a5b0ba")
 
-    # Taiwan market convention: red up candles, green down candles.
-    max_volume = max((row["volume"] for row in rows), default=0.0) or 1.0
-    for idx, row in enumerate(rows):
-        x = left + (idx + 0.5) * slot
-        y_open = y_price(row["open"])
-        y_close = y_price(row["close"])
-        y_high = y_price(row["high"])
-        y_low = y_price(row["low"])
-        candle_color = "#ff525d" if row["close"] >= row["open"] else "#26c281"
-        draw.line((x, y_high, x, y_low), fill=candle_color, width=2)
-        top = min(y_open, y_close)
-        bottom = max(y_open, y_close)
-        if bottom - top < 2:
-            bottom = top + 2
-        draw.rectangle((x - candle_width / 2, top, x + candle_width / 2, bottom), fill=candle_color)
-        vol_height = row["volume"] / max_volume * (vol_bottom - vol_top)
-        draw.rectangle((x - candle_width / 2, vol_bottom - vol_height, x + candle_width / 2, vol_bottom), fill=candle_color)
+    # Time axis is fixed to the Taiwan regular session; the plotted line grows as candles arrive.
+    for minute, label in ((0, "09:00"), (60, "10:00"), (120, "11:00"), (180, "12:00"), (240, "13:00"), (270, "13:30")):
+        x = left + minute / _SESSION_MINUTES * plot_width
+        draw.line((x, plot_top, x, volume_bottom), fill="#202a33", width=1)
+        draw.text((int(x - 25), 1100), label, font=small_font, fill="#9aa6b2")
 
-    # Draw averages on top of candles, as users expect from a technical chart.
-    legend_x, legend_y = left, 102
-    draw.rectangle((left, 92, right, 117), fill="#0b0f14")
-    for period, color, averages in ma_drawn:
-        points = [
-            (left + (idx + 0.5) * slot, y_price(avg))
-            for idx, avg in enumerate(averages) if avg is not None
-        ]
-        if len(points) >= 2:
-            draw.line(points, fill=color, width=3, joint="curve")
-        draw.line((legend_x, legend_y + 8, legend_x + 24, legend_y + 8), fill=color, width=3)
-        draw.text((legend_x + 30, legend_y), f"MA{period}", font=small_font, fill=color)
-        legend_x += 95
-    for period in ma_hidden:
-        draw.text((legend_x, legend_y), f"MA{period} hidden (divergent)", font=small_font, fill="#78838e")
-        legend_x += 165
+    # Previous close and daily moving averages are reference levels, not intraday price curves.
+    if previous_close is not None and axis_low <= previous_close <= axis_high:
+        _draw_dashed_line(draw, (left, int(y_price(previous_close)), right, int(y_price(previous_close))), "#89939c", 2)
+        draw.text((right - 110, int(y_price(previous_close)) - 22), f"PREV {previous_close:.2f}", font=small_font, fill="#aab4bd")
 
-    draw.line((left, vol_top, right, vol_top), fill="#34414d", width=1)
-    draw.text((left, 625), "VOLUME (LOTS)", font=small_font, fill="#a8b4c0")
+    ma_colors = {5: "#f4c542", 10: "#38cbd0", 20: "#bd83ff"}
+    legend_x = left
+    legend_y = 302
+    draw.text((42, legend_y), "PRICE", font=small_font, fill=price_color)
+    draw.line((105, legend_y + 9, 135, legend_y + 9), fill=price_color, width=4)
+    draw.text((150, legend_y), "AVG", font=small_font, fill="#d4d9de")
+    draw.line((190, legend_y + 9, 220, legend_y + 9), fill="#d4d9de", width=3)
+    legend_x = 250
+    for period in (5, 10, 20):
+        if period in visible_mas:
+            color = ma_colors[period]
+            y = int(y_price(visible_mas[period]))
+            _draw_dashed_line(draw, (left, y, right, y), color, 2)
+            draw.text((right - 112, y - 22), f"MA{period} {visible_mas[period]:.2f}", font=small_font, fill=color)
+            draw.line((legend_x, legend_y + 9, legend_x + 24, legend_y + 9), fill=color, width=3)
+            draw.text((legend_x + 31, legend_y), f"MA{period}", font=small_font, fill=color)
+            legend_x += 110
+        elif period in hidden_mas:
+            draw.text((legend_x, legend_y), f"MA{period} hidden", font=small_font, fill="#6d7882")
+            legend_x += 105
 
-    latest = rows[-1]
-    latest_quote_price = _number(quote.get("lastPrice")) or latest["close"]
-    draw.text((left, 830), f"Last {latest_quote_price:.2f}   Candle date {latest['date']}   Bars {count}", font=label_font, fill="#f0f4f8")
-    draw.text((left, 860), "Intraday candle uses the latest available quote; moving averages use daily closes.", font=small_font, fill="#8f9ba7")
+    # Subtle filled area below the intraday line, like the supplied brokerage reference.
+    price_points = [(x_time(point["time"]), y_price(point["price"])) for point in points]
+    if len(price_points) >= 2:
+        overlay = Image.new("RGBA", image.size, (0, 0, 0, 0))
+        overlay_draw = ImageDraw.Draw(overlay)
+        polygon = [(price_points[0][0], plot_bottom)] + price_points + [(price_points[-1][0], plot_bottom)]
+        overlay_draw.polygon(polygon, fill=fill_color)
+        image = Image.alpha_composite(image.convert("RGBA"), overlay).convert("RGB")
+        draw = ImageDraw.Draw(image)
+    if len(price_points) >= 2:
+        draw.line(price_points, fill=price_color, width=4, joint="curve")
+    elif price_points:
+        x, y = price_points[0]
+        draw.ellipse((x - 4, y - 4, x + 4, y + 4), fill=price_color)
+
+    average_points = [
+        (x_time(point["time"]), y_price(point["average"]))
+        for point in points if point.get("average") is not None
+    ]
+    if len(average_points) >= 2:
+        draw.line(average_points, fill="#d4d9de", width=3, joint="curve")
+
+    # Current quote marker and label.
+    if price_points:
+        last_x, last_y = price_points[-1]
+        draw.ellipse((last_x - 6, last_y - 6, last_x + 6, last_y + 6), fill=price_color, outline="#ffffff", width=2)
+        label_x = max(left + 4, min(int(last_x - 82), right - 160))
+        label_y = max(plot_top + 4, min(int(last_y - 34), plot_bottom - 28))
+        draw.rounded_rectangle((label_x, label_y, label_x + 154, label_y + 26), radius=5, fill=price_color)
+        draw.text((label_x + 8, label_y + 3), f"LAST {latest_price:.2f}", font=small_font, fill="#081016")
+
+    # Per-minute volume bars; Fugle's regular-board candles already use lots.
+    draw.line((left, volume_top, right, volume_top), fill="#46515b", width=1)
+    draw.text((42, 890), "VOLUME (LOTS / MIN)", font=small_font, fill="#93a1ad")
+    max_volume = max((point["volume"] for point in points), default=0.0) or 1.0
+    bar_width = max(2, min(6, plot_width / max(_SESSION_MINUTES, 1) * 0.72))
+    for point in points:
+        volume = max(0.0, point.get("volume", 0.0))
+        if volume <= 0:
+            continue
+        x = x_time(point["time"])
+        bar_height = max(1, volume / max_volume * (volume_bottom - volume_top))
+        draw.rectangle((x - bar_width / 2, volume_bottom - bar_height, x + bar_width / 2, volume_bottom), fill="#2386bc")
+
+    draw.text((42, 1150), f"{len(points)} intraday points  |  1-minute candles  |  {points[-1]['time']:%H:%M:%S}", font=small_font, fill="#a7b2bc")
+    draw.text((42, 1176), "Each lookup fetches the latest available session data. MA lines use daily closes.", font=small_font, fill="#73808b")
 
     original = io.BytesIO()
     image.save(original, format="PNG", optimize=True)
     preview_image = image.copy()
-    preview_image.thumbnail((960, 720), Image.Resampling.LANCZOS)
+    preview_image.thumbnail((900, 1024), Image.Resampling.LANCZOS)
     preview = io.BytesIO()
     preview_image.save(preview, format="PNG", optimize=True)
     return original.getvalue(), preview.getvalue()
 
 
 def create_stock_chart(stock_code: str, quote: dict) -> str | None:
-    """Build a chart and return an opaque, short-lived ID for public image endpoints."""
+    """Create an intraday line chart; never fall back to a misleading daily-candle chart."""
     try:
-        rows = _daily_rows(stock_code, quote)
-        if not rows:
+        candles = _fetch_intraday_candles(stock_code, quote)
+        if not candles:
+            logger.warning("Intraday chart omitted because no minute candles were returned: %s", stock_code)
             return None
-        original, preview = _render_chart(stock_code, rows, quote)
+        points = _merge_latest_quote(candles, quote)
+        if not points:
+            return None
+        ma_levels = _daily_ma_levels(stock_code, quote)
+        original, preview = _render_chart(stock_code, points, quote, ma_levels)
         chart_id = uuid.uuid4().hex
         now = time.monotonic()
         with _cache_lock:
@@ -380,7 +623,7 @@ def create_stock_chart(stock_code: str, quote: dict) -> str | None:
             _chart_cache[chart_id] = (now + _CHART_TTL_SECONDS, original, preview)
         return chart_id
     except Exception:
-        logger.exception("Failed to create stock chart for %s", stock_code)
+        logger.exception("Failed to create intraday stock chart for %s", stock_code)
         return None
 
 
